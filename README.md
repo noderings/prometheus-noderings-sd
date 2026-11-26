@@ -75,8 +75,10 @@ docker run -d --name noderings-sd -p 10064:10064 \
    ```
 
 More in [`examples/`](examples): a full [`prometheus.yml`](examples/prometheus.yml),
-[file SD](examples/file_sd.yml), [Grafana Alloy](examples/alloy.river) and a
-[Docker Compose](examples/docker-compose.yml) setup.
+[file SD](examples/file_sd.yml), [Grafana Alloy](examples/alloy.river), a
+[Docker Compose](examples/docker-compose.yml) setup and a
+[Grafana dashboard](examples/grafana-dashboard.json) for the whole fleet (it expects the
+`instance`, `city`, `plan` and `provider` relabeling from [`prometheus.yml`](examples/prometheus.yml)).
 
 ## Endpoints
 
