@@ -1,0 +1,30 @@
+// Grafana Alloy: discover NodeRings VMs and scrape node_exporter on them.
+discovery.http "noderings" {
+  url              = "http://localhost:10064/targets?port=9100"
+  refresh_interval = "60s"
+}
+
+discovery.relabel "noderings" {
+  targets = discovery.http.noderings.targets
+
+  rule {
+    source_labels = ["__meta_noderings_vm_status"]
+    regex         = "started"
+    action        = "keep"
+  }
+  rule {
+    source_labels = ["__meta_noderings_vm_hostname"]
+    target_label  = "instance"
+  }
+}
+
+prometheus.scrape "noderings" {
+  targets    = discovery.relabel.noderings.output
+  forward_to = [prometheus.remote_write.default.receiver]
+}
+
+prometheus.remote_write "default" {
+  endpoint {
+    url = "https://prometheus.example.com/api/v1/write"
+  }
+}

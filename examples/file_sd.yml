@@ -1,0 +1,13 @@
+# For Prometheus versions or agents without http_sd_configs: run
+#   prometheus-noderings-sd --file.output=/etc/prometheus/noderings.json --target.port=9100
+# and point file_sd_configs at the file. Prometheus re-reads it when it changes.
+scrape_configs:
+  - job_name: noderings-node
+    file_sd_configs:
+      - files: [/etc/prometheus/noderings.json]
+    relabel_configs:
+      - source_labels: [__meta_noderings_vm_status]
+        regex: started
+        action: keep
+      - source_labels: [__meta_noderings_vm_hostname]
+        target_label: instance

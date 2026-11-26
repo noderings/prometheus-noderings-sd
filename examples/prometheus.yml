@@ -1,0 +1,43 @@
+# Prometheus configuration that scrapes node_exporter on every running
+# NodeRings VM, found through prometheus-noderings-sd.
+global:
+  scrape_interval: 30s
+
+scrape_configs:
+  - job_name: noderings-node
+    http_sd_configs:
+      # ?port= sets the port of every target; the default is --target.port (80).
+      - url: http://localhost:10064/targets?port=9100
+        refresh_interval: 60s
+    relabel_configs:
+      # Only scrape running VMs.
+      - source_labels: [__meta_noderings_vm_status]
+        regex: started
+        action: keep
+      # Use the hostname as the instance label instead of IP:port.
+      - source_labels: [__meta_noderings_vm_hostname]
+        target_label: instance
+      - source_labels: [__meta_noderings_region_city]
+        target_label: city
+      - source_labels: [__meta_noderings_plan_code]
+        target_label: plan
+      # Copy every NodeRings tag into a "tag_<name>" label.
+      - regex: __meta_noderings_tag_(.+)
+        action: labelmap
+        replacement: tag_$1
+
+  # Only VMs tagged "web", scraped on port 8080.
+  - job_name: noderings-web
+    http_sd_configs:
+      - url: http://localhost:10064/targets?port=8080
+    relabel_configs:
+      - source_labels: [__meta_noderings_tags]
+        regex: .*,web,.*
+        action: keep
+      - source_labels: [__meta_noderings_vm_hostname]
+        target_label: instance
+
+  # The service discovery's own metrics.
+  - job_name: prometheus-noderings-sd
+    static_configs:
+      - targets: [localhost:10064]

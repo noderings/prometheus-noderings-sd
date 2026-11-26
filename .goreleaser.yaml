@@ -1,0 +1,43 @@
+version: 2
+project_name: prometheus-noderings-sd
+
+builds:
+  - main: ./cmd/prometheus-noderings-sd
+    binary: prometheus-noderings-sd
+    env: [CGO_ENABLED=0]
+    flags: [-trimpath]
+    ldflags:
+      - -s -w
+      - -X github.com/prometheus/common/version.Version={{ .Version }}
+      - -X github.com/prometheus/common/version.Revision={{ .FullCommit }}
+      - -X github.com/prometheus/common/version.Branch={{ .Branch }}
+      - -X github.com/prometheus/common/version.BuildUser=goreleaser
+      - -X github.com/prometheus/common/version.BuildDate={{ time "20060102-15:04:05" }}
+    goos: [linux, darwin, windows, freebsd]
+    goarch: [amd64, arm64, arm]
+    goarm: ["7"]
+    ignore:
+      - goos: darwin
+        goarch: arm
+      - goos: windows
+        goarch: arm
+
+archives:
+  # Same layout as the Prometheus project's own releases:
+  # prometheus-noderings-sd-0.1.0.linux-amd64/prometheus-noderings-sd
+  - name_template: "{{ .ProjectName }}-{{ .Version }}.{{ .Os }}-{{ .Arch }}{{ if .Arm }}v{{ .Arm }}{{ end }}"
+    wrap_in_directory: true
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files: [LICENSE, README.md, examples/*]
+
+checksum:
+  name_template: sha256sums.txt
+
+changelog:
+  use: github-native
+
+release:
+  draft: false

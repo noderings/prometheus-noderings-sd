@@ -1,0 +1,5 @@
+bin/
+/prometheus-noderings-sd
+dist/
+*.test
+coverage.out

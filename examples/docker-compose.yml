@@ -1,0 +1,20 @@
+# docker compose up: prometheus-noderings-sd plus a Prometheus that uses it.
+# Put your token in ./noderings-token (one line) first.
+services:
+  noderings-sd:
+    image: ghcr.io/noderings/prometheus-noderings-sd:latest
+    command: ["--noderings.token-file=/run/secrets/noderings_token", "--target.port=9100"]
+    secrets: [noderings_token]
+    ports: ["10064:10064"]
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./prometheus-compose.yml:/etc/prometheus/prometheus.yml:ro
+    ports: ["9090:9090"]
+    restart: unless-stopped
+
+secrets:
+  noderings_token:
+    file: ./noderings-token

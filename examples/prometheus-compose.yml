@@ -1,0 +1,14 @@
+# Used by docker-compose.yml: the SD service is reachable as noderings-sd.
+scrape_configs:
+  - job_name: noderings-node
+    http_sd_configs:
+      - url: http://noderings-sd:10064/targets
+    relabel_configs:
+      - source_labels: [__meta_noderings_vm_status]
+        regex: started
+        action: keep
+      - source_labels: [__meta_noderings_vm_hostname]
+        target_label: instance
+  - job_name: prometheus-noderings-sd
+    static_configs:
+      - targets: [noderings-sd:10064]
