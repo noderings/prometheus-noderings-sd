@@ -19,8 +19,14 @@ scrape_configs:
         target_label: instance
       - source_labels: [__meta_noderings_region_city]
         target_label: city
+      - source_labels: [__meta_noderings_region_country]
+        target_label: country
       - source_labels: [__meta_noderings_plan_code]
         target_label: plan
+      - source_labels: [__meta_noderings_provider_name]
+        target_label: provider
+      - source_labels: [__meta_noderings_vm_id]
+        target_label: vm_id
       # Copy every NodeRings tag into a "tag_<name>" label.
       - regex: __meta_noderings_tag_(.+)
         action: labelmap

@@ -33,7 +33,7 @@ import (
 const name = "prometheus-noderings-sd"
 
 func main() {
-	app := kingpin.New(name, "Prometheus service discovery for NodeRings virtual machines.")
+	app := kingpin.New(name, "Prometheus service discovery for NodeRings virtual machines, game servers and DNS records.")
 	var (
 		apiURL = app.Flag("noderings.api-url", "NodeRings API URL.").
 			Envar("NODERINGS_API_URL").Default(noderings.DefaultEndpoint).String()
@@ -41,9 +41,13 @@ func main() {
 				Envar("NODERINGS_TOKEN_FILE").PlaceHolder("FILE").String()
 		orgID = app.Flag("noderings.organization-id", "Organization to discover VMs in. Defaults to the token's organization.").
 			Envar("NODERINGS_ORGANIZATION_ID").PlaceHolder("ID").String()
-		refresh = app.Flag("discovery.refresh-interval", "How often to fetch the VM list from the NodeRings API.").
+		refresh = app.Flag("discovery.refresh-interval", "How often to fetch the resources from the NodeRings API.").
 			Default("60s").Duration()
-		port = app.Flag("target.port", "Port added to each target address. HTTP SD clients can override it with ?port=.").
+		roles = app.Flag("discovery.role", "Resources to discover: vm, gameserver, dns. Comma-separated or repeated. Clients pick one with ?role=.").
+			Default(discovery.RoleVM).Strings()
+		dnsTypes = app.Flag("dns.record-types", "DNS record types whose host names become targets of the dns role.").
+				Default("A,AAAA,CNAME").String()
+		port = app.Flag("target.port", "Port added to each VM target address. HTTP SD clients can override it with ?port=.").
 			Default("80").Int()
 		family = app.Flag("target.address-family", "Address used for targets: ipv4 or ipv6. A VM without that address falls back to the other.").
 			Default(discovery.AddressIPv4).Enum(discovery.AddressIPv4, discovery.AddressIPv6)
@@ -53,7 +57,7 @@ func main() {
 				Default("/targets").String()
 		metricsPath = app.Flag("web.telemetry-path", "Path under which to expose the service's own metrics.").
 				Default("/metrics").String()
-		outputFile = app.Flag("file.output", "Also write the targets to this file for file_sd_configs. Empty disables it.").
+		outputFile = app.Flag("file.output", "Also write the targets to this file for file_sd_configs. With several roles, put {role} in the name to get one file per role. Empty disables it.").
 				PlaceHolder("FILE").String()
 		webConfig = kingpinflag.AddFlags(app, ":10064")
 	)
@@ -66,6 +70,7 @@ func main() {
 	logger := promslog.New(logConfig)
 	if err := run(logger, options{
 		apiURL: *apiURL, tokenFile: *tokenFile, orgID: *orgID, refresh: *refresh,
+		roles: splitList(*roles), dnsTypes: splitList([]string{*dnsTypes}),
 		port: *port, family: *family, tagSep: *tagSep, targetsPath: *targetsPath,
 		metricsPath: *metricsPath, outputFile: *outputFile, web: webConfig,
 	}); err != nil {
@@ -77,6 +82,7 @@ func main() {
 type options struct {
 	apiURL, tokenFile, orgID string
 	refresh                  time.Duration
+	roles, dnsTypes          []string
 	port                     int
 	family, tagSep           string
 	targetsPath, metricsPath string
@@ -112,14 +118,23 @@ func run(logger *slog.Logger, o options) error {
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 	)
-	opts := discovery.Options{Port: o.port, AddressFamily: o.family, TagSeparator: o.tagSep}
-	d := discovery.New(client, opts, logger, reg)
+	opts := discovery.Options{Port: o.port, AddressFamily: o.family, TagSeparator: o.tagSep, DNSRecordTypes: o.dnsTypes}
+	d, err := discovery.New(client, o.roles, opts, logger, reg)
+	if err != nil {
+		return err
+	}
 
 	if o.outputFile != "" {
-		fw := &discovery.FileWriter{Path: o.outputFile}
-		d.OnUpdate(func(vms []noderings.VirtualMachine) {
-			if err := fw.Write(discovery.Build(vms, opts)); err != nil {
-				logger.Error("writing the file_sd output failed", "err", err)
+		if len(d.Roles()) > 1 && !strings.Contains(o.outputFile, "{role}") {
+			return fmt.Errorf("--file.output must contain {role} when several roles are enabled, for example /etc/prometheus/noderings-{role}.json")
+		}
+		writers := map[string]*discovery.FileWriter{}
+		for _, r := range d.Roles() {
+			writers[r] = &discovery.FileWriter{Path: strings.ReplaceAll(o.outputFile, "{role}", r)}
+		}
+		d.OnUpdate(func(role string) {
+			if err := writers[role].Write(d.TargetGroups(role, 0)); err != nil {
+				logger.Error("writing the file_sd output failed", "role", role, "err", err)
 			}
 		})
 	}
@@ -139,7 +154,7 @@ func run(logger *slog.Logger, o options) error {
 	}
 	go func() {
 		// Run refreshes immediately; skip that when the check above succeeded.
-		if d.Ready() {
+		if d.AllReady() {
 			select {
 			case <-ctx.Done():
 				return
@@ -154,8 +169,8 @@ func run(logger *slog.Logger, o options) error {
 	mux.Handle(o.metricsPath, promhttp.HandlerFor(reg, promhttp.HandlerOpts{Registry: reg}))
 	mux.HandleFunc("/-/healthy", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("OK\n")) })
 	mux.HandleFunc("/-/ready", func(w http.ResponseWriter, _ *http.Request) {
-		if !d.Ready() {
-			http.Error(w, "the NodeRings VM list has not been fetched yet", http.StatusServiceUnavailable)
+		if !d.AllReady() {
+			http.Error(w, "not every role has been fetched from the NodeRings API yet", http.StatusServiceUnavailable)
 			return
 		}
 		_, _ = w.Write([]byte("OK\n"))
@@ -163,10 +178,10 @@ func run(logger *slog.Logger, o options) error {
 	if o.metricsPath != "/" && o.targetsPath != "/" {
 		landing, err := web.NewLandingPage(web.LandingConfig{
 			Name:        name,
-			Description: "Prometheus service discovery for NodeRings virtual machines",
+			Description: "Prometheus service discovery for NodeRings virtual machines, game servers and DNS records",
 			Version:     version.Info(),
 			Links: []web.LandingLinks{
-				{Address: o.targetsPath, Text: "Targets", Description: "HTTP SD target list (add ?port=9100 to change the port)"},
+				{Address: o.targetsPath, Text: "Targets", Description: "HTTP SD target list. ?role=vm|gameserver|dns picks the resources, ?port= the port"},
 				{Address: o.metricsPath, Text: "Metrics", Description: "Metrics about the service discovery itself"},
 				{Address: "/-/healthy", Text: "Health"},
 			},
@@ -178,7 +193,7 @@ func run(logger *slog.Logger, o options) error {
 	}
 
 	logger.Info("starting "+name, "version", version.Info(), "build_context", version.BuildContext(),
-		"vms", d.VMCount(), "refresh_interval", o.refresh, "target_port", o.port, "file_output", o.outputFile)
+		"roles", strings.Join(d.Roles(), ","), "vms", d.Count(discovery.RoleVM), "refresh_interval", o.refresh, "target_port", o.port, "file_output", o.outputFile)
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 	go func() {
 		<-ctx.Done()
@@ -207,4 +222,17 @@ func loadToken(file string) (string, error) {
 		return t, nil
 	}
 	return "", errors.New("set NODERINGS_TOKEN or --noderings.token-file to a NodeRings API token")
+}
+
+// splitList splits repeated and comma-separated flag values.
+func splitList(values []string) []string {
+	var out []string
+	for _, v := range values {
+		for _, f := range strings.Split(v, ",") {
+			if f = strings.TrimSpace(f); f != "" {
+				out = append(out, f)
+			}
+		}
+	}
+	return out
 }

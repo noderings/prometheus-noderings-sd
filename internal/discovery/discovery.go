@@ -1,12 +1,13 @@
-// Package discovery turns NodeRings virtual machines into Prometheus target
-// groups, in the format used by HTTP and file-based service discovery.
+// Package discovery turns NodeRings resources (virtual machines, game servers
+// and DNS records) into Prometheus target groups, in the format used by HTTP
+// and file-based service discovery.
 package discovery
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
-	"net"
 	"sort"
 	"strconv"
 	"strings"
@@ -18,34 +19,28 @@ import (
 	"github.com/noderings/prometheus-noderings-sd/internal/noderings"
 )
 
-// Meta label names. Every label starts with __meta_noderings_ and is dropped
-// by Prometheus after relabeling unless copied to a target label.
+// Roles are the kinds of NodeRings resources that can be discovered, the way
+// Prometheus' built-in discoveries use a role (for example hetzner_sd_config).
 const (
-	metaPrefix = "__meta_noderings_"
+	RoleVM         = "vm"
+	RoleGameServer = "gameserver"
+	RoleDNS        = "dns"
+)
 
-	LabelVMID              = metaPrefix + "vm_id"
-	LabelVMHostname        = metaPrefix + "vm_hostname"
-	LabelVMStatus          = metaPrefix + "vm_status"
-	LabelVMDistro          = metaPrefix + "vm_distro"
-	LabelVMCPUs            = metaPrefix + "vm_cpus"
-	LabelVMMemoryBytes     = metaPrefix + "vm_memory_bytes"
-	LabelVMDiskBytes       = metaPrefix + "vm_disk_bytes"
-	LabelPublicIPv4        = metaPrefix + "public_ipv4"
-	LabelPublicIPv6        = metaPrefix + "public_ipv6"
-	LabelAdditionalIPv4    = metaPrefix + "additional_ipv4"
-	LabelRegionID          = metaPrefix + "region_id"
-	LabelRegionCountry     = metaPrefix + "region_country"
-	LabelRegionCity        = metaPrefix + "region_city"
-	LabelPlanID            = metaPrefix + "plan_id"
-	LabelPlanCode          = metaPrefix + "plan_code"
-	LabelBillingType       = metaPrefix + "billing_type"
-	LabelProviderName      = metaPrefix + "provider_name"
-	LabelProviderOrgID     = metaPrefix + "provider_organization_id"
-	LabelFirewallRulesetID = metaPrefix + "firewall_ruleset_id"
-	LabelBackupsEnabled    = metaPrefix + "backups_enabled"
-	LabelInstantApp        = metaPrefix + "instant_app"
-	LabelTags              = metaPrefix + "tags"
-	LabelTagPrefix         = metaPrefix + "tag_"
+// AllRoles lists every role in display order.
+var AllRoles = []string{RoleVM, RoleGameServer, RoleDNS}
+
+const metaPrefix = "__meta_noderings_"
+
+// Labels shared by roles whose resources run in a region on a plan.
+const (
+	LabelRegionID      = metaPrefix + "region_id"
+	LabelRegionCountry = metaPrefix + "region_country"
+	LabelRegionCity    = metaPrefix + "region_city"
+	LabelPlanID        = metaPrefix + "plan_id"
+	LabelPlanCode      = metaPrefix + "plan_code"
+	LabelBillingType   = metaPrefix + "billing_type"
+	LabelProviderName  = metaPrefix + "provider_name"
 )
 
 // Address families a target address can be built from.
@@ -60,79 +55,173 @@ type TargetGroup struct {
 	Labels  map[string]string `json:"labels"`
 }
 
-// Lister lists virtual machines.
+// Lister reads NodeRings resources. *noderings.Client implements it.
 type Lister interface {
 	ListVirtualMachines(ctx context.Context) ([]noderings.VirtualMachine, error)
+	ListGameServers(ctx context.Context) ([]noderings.GameServer, error)
+	ListDNSZones(ctx context.Context) ([]noderings.DNSZone, error)
+	ListDNSRecords(ctx context.Context, zoneID string) ([]noderings.DNSRecord, error)
 }
 
 // Options configure how target groups are built.
 type Options struct {
-	// Port is added to each target address. Zero means 80.
+	// Port is added to each VM target (zero means 80). For game servers it
+	// replaces their own port and for DNS host names it is appended, but only
+	// when a request passes ?port=.
 	Port int
-	// AddressFamily picks the address used for __address__: AddressIPv4
+	// AddressFamily picks the VM address used for __address__: AddressIPv4
 	// (default) or AddressIPv6. A VM without that address falls back to the other.
 	AddressFamily string
-	// TagSeparator joins tags and additional IPs. Empty means ",". The joined
-	// value also starts and ends with it, so a relabel regex like .*,web,.* matches.
+	// TagSeparator joins list values. Empty means ",". The joined value also
+	// starts and ends with it, so a relabel regex like .*,web,.* matches.
 	TagSeparator string
+	// DNSRecordTypes are the record types that become DNS targets. Empty
+	// means A, AAAA and CNAME.
+	DNSRecordTypes []string
 }
 
-// Discoverer keeps the latest list of VMs and builds target groups from it.
+func (o Options) withDefaults() Options {
+	if o.AddressFamily == "" {
+		o.AddressFamily = AddressIPv4
+	}
+	if o.TagSeparator == "" {
+		o.TagSeparator = ","
+	}
+	if len(o.DNSRecordTypes) == 0 {
+		o.DNSRecordTypes = []string{"A", "AAAA", "CNAME"}
+	}
+	return o
+}
+
+// snapshot is the last successful fetch of one role.
+type snapshot struct {
+	ready bool
+	data  any // []noderings.VirtualMachine, []noderings.GameServer or []dnsZoneRecords
+	count int
+}
+
+// Discoverer keeps the latest resources of each enabled role and builds
+// target groups from them.
 type Discoverer struct {
 	lister  Lister
+	roles   []string
 	opts    Options
 	log     *slog.Logger
 	metrics *metrics
 
-	mu        sync.RWMutex
-	vms       []noderings.VirtualMachine
-	refreshed bool
-	onUpdate  []func([]noderings.VirtualMachine)
+	mu       sync.RWMutex
+	snaps    map[string]snapshot
+	onUpdate []func(role string)
 }
 
-// New returns a Discoverer. reg may be nil.
-func New(lister Lister, opts Options, log *slog.Logger, reg prometheus.Registerer) *Discoverer {
-	if opts.Port == 0 {
-		opts.Port = 80
+// New returns a Discoverer for the given roles (RoleVM when empty). reg may be nil.
+func New(lister Lister, roles []string, opts Options, log *slog.Logger, reg prometheus.Registerer) (*Discoverer, error) {
+	if len(roles) == 0 {
+		roles = []string{RoleVM}
 	}
-	if opts.AddressFamily == "" {
-		opts.AddressFamily = AddressIPv4
-	}
-	if opts.TagSeparator == "" {
-		opts.TagSeparator = ","
+	seen := map[string]bool{}
+	var clean []string
+	for _, r := range roles {
+		r = strings.TrimSpace(strings.ToLower(r))
+		if !isRole(r) {
+			return nil, fmt.Errorf("unknown role %q: use %s", r, strings.Join(AllRoles, ", "))
+		}
+		if !seen[r] {
+			seen[r] = true
+			clean = append(clean, r)
+		}
 	}
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
-	return &Discoverer{lister: lister, opts: opts, log: log, metrics: newMetrics(reg)}
+	m := newMetrics(reg)
+	m.init(clean)
+	return &Discoverer{
+		lister: lister, roles: clean, opts: opts.withDefaults(), log: log,
+		metrics: m, snaps: map[string]snapshot{},
+	}, nil
 }
 
-// OnUpdate registers f to run after every successful refresh.
-func (d *Discoverer) OnUpdate(f func([]noderings.VirtualMachine)) {
+func isRole(r string) bool {
+	for _, x := range AllRoles {
+		if r == x {
+			return true
+		}
+	}
+	return false
+}
+
+// Roles returns the enabled roles.
+func (d *Discoverer) Roles() []string { return append([]string(nil), d.roles...) }
+
+// Enabled reports whether role is enabled.
+func (d *Discoverer) Enabled(role string) bool {
+	for _, r := range d.roles {
+		if r == role {
+			return true
+		}
+	}
+	return false
+}
+
+// OnUpdate registers f to run after every successful refresh of a role.
+func (d *Discoverer) OnUpdate(f func(role string)) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.onUpdate = append(d.onUpdate, f)
 }
 
-// Refresh fetches the VM list once. On error the previous list is kept.
+// Refresh fetches every enabled role once. A role whose fetch fails keeps its
+// previous data. The returned error joins the failures.
 func (d *Discoverer) Refresh(ctx context.Context) error {
+	var errs []error
+	for _, role := range d.roles {
+		if err := d.refreshRole(ctx, role); err != nil {
+			errs = append(errs, fmt.Errorf("role %s: %w", role, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func (d *Discoverer) refreshRole(ctx context.Context, role string) error {
 	start := time.Now()
-	vms, err := d.lister.ListVirtualMachines(ctx)
-	d.metrics.duration.Observe(time.Since(start).Seconds())
+	var (
+		data  any
+		count int
+		err   error
+	)
+	switch role {
+	case RoleVM:
+		var vms []noderings.VirtualMachine
+		vms, err = d.lister.ListVirtualMachines(ctx)
+		sort.Slice(vms, func(i, j int) bool { return vms[i].ID < vms[j].ID })
+		data, count = vms, len(vms)
+	case RoleGameServer:
+		var gs []noderings.GameServer
+		gs, err = d.lister.ListGameServers(ctx)
+		sort.Slice(gs, func(i, j int) bool { return gs[i].ID < gs[j].ID })
+		data, count = gs, len(gs)
+	case RoleDNS:
+		var zones []dnsZoneRecords
+		zones, err = d.fetchDNS(ctx)
+		data = zones
+		for _, z := range zones {
+			count += len(z.records)
+		}
+	}
+	d.metrics.duration.WithLabelValues(role).Observe(time.Since(start).Seconds())
 	if err != nil {
-		d.metrics.failures.Inc()
+		d.metrics.failures.WithLabelValues(role).Inc()
 		return err
 	}
-	sort.Slice(vms, func(i, j int) bool { return vms[i].ID < vms[j].ID })
 	d.mu.Lock()
-	d.vms = vms
-	d.refreshed = true
-	hooks := append([]func([]noderings.VirtualMachine){}, d.onUpdate...)
+	d.snaps[role] = snapshot{ready: true, data: data, count: count}
+	hooks := append([]func(string){}, d.onUpdate...)
 	d.mu.Unlock()
-	d.metrics.vms.Set(float64(len(vms)))
-	d.metrics.lastSuccess.SetToCurrentTime()
+	d.metrics.resources.WithLabelValues(role).Set(float64(count))
+	d.metrics.lastSuccess.WithLabelValues(role).SetToCurrentTime()
 	for _, f := range hooks {
-		f(vms)
+		f(role)
 	}
 	return nil
 }
@@ -143,9 +232,7 @@ func (d *Discoverer) Run(ctx context.Context, interval time.Duration) {
 	defer t.Stop()
 	for {
 		if err := d.Refresh(ctx); err != nil && ctx.Err() == nil {
-			d.log.Error("refreshing the NodeRings VM list failed; serving the previous list", "err", err)
-		} else if err == nil {
-			d.log.Debug("refreshed the NodeRings VM list", "vms", d.VMCount())
+			d.log.Error("refreshing from the NodeRings API failed; serving the previous lists", "err", err)
 		}
 		select {
 		case <-ctx.Done():
@@ -155,111 +242,53 @@ func (d *Discoverer) Run(ctx context.Context, interval time.Duration) {
 	}
 }
 
-// Ready reports whether at least one refresh has succeeded.
-func (d *Discoverer) Ready() bool {
+// Ready reports whether role has been fetched successfully at least once.
+func (d *Discoverer) Ready(role string) bool {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
-	return d.refreshed
+	return d.snaps[role].ready
 }
 
-// VMCount returns the number of VMs in the current list.
-func (d *Discoverer) VMCount() int {
+// AllReady reports whether every enabled role is ready.
+func (d *Discoverer) AllReady() bool {
+	for _, r := range d.roles {
+		if !d.Ready(r) {
+			return false
+		}
+	}
+	return true
+}
+
+// Count returns the number of resources in role's current data.
+func (d *Discoverer) Count(role string) int {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
-	return len(d.vms)
+	return d.snaps[role].count
 }
 
-// TargetGroups builds the target groups from the current list, with the
-// configured port, or with port when it is not zero.
-func (d *Discoverer) TargetGroups(port int) []TargetGroup {
+// TargetGroups builds the target groups of role from its current data, with
+// port overriding the configured port when it is not zero.
+func (d *Discoverer) TargetGroups(role string, port int) []TargetGroup {
 	d.mu.RLock()
-	vms := d.vms
+	snap := d.snaps[role]
 	d.mu.RUnlock()
 	opts := d.opts
-	if port != 0 {
+	switch data := snap.data.(type) {
+	case []noderings.VirtualMachine:
+		if port != 0 {
+			opts.Port = port
+		}
+		return BuildVMs(data, opts)
+	case []noderings.GameServer:
+		// --target.port is for VMs; game servers keep their own port unless
+		// the request asks for another one.
 		opts.Port = port
+		return BuildGameServers(data, opts)
+	case []dnsZoneRecords:
+		opts.Port = port
+		return buildDNS(data, opts)
 	}
-	return Build(vms, opts)
-}
-
-// Build converts VMs into target groups, one per VM with an address. VMs
-// without any public address are left out.
-func Build(vms []noderings.VirtualMachine, opts Options) []TargetGroup {
-	if opts.Port == 0 {
-		opts.Port = 80
-	}
-	if opts.TagSeparator == "" {
-		opts.TagSeparator = ","
-	}
-	groups := make([]TargetGroup, 0, len(vms))
-	for i := range vms {
-		vm := &vms[i]
-		host := pickAddress(vm, opts.AddressFamily)
-		if host == "" {
-			continue
-		}
-		groups = append(groups, TargetGroup{
-			Targets: []string{net.JoinHostPort(host, strconv.Itoa(opts.Port))},
-			Labels:  labels(vm, opts.TagSeparator),
-		})
-	}
-	return groups
-}
-
-func pickAddress(vm *noderings.VirtualMachine, family string) string {
-	v4, v6 := strings.TrimSpace(vm.IPv4), strings.TrimSpace(vm.IPv6)
-	if family == AddressIPv6 {
-		if v6 != "" {
-			return v6
-		}
-		return v4
-	}
-	if v4 != "" {
-		return v4
-	}
-	return v6
-}
-
-func labels(vm *noderings.VirtualMachine, sep string) map[string]string {
-	l := map[string]string{
-		LabelVMID:              vm.ID,
-		LabelVMHostname:        vm.Hostname,
-		LabelVMStatus:          enumValue(vm.OperationStatus, "OPERATION_STATUS_"),
-		LabelVMDistro:          enumValue(vm.Distro, "DISTRO_"),
-		LabelVMCPUs:            strconv.FormatInt(int64(vm.CPU), 10),
-		LabelVMMemoryBytes:     strconv.FormatInt(int64(vm.Memory)<<20, 10),
-		LabelVMDiskBytes:       strconv.FormatInt(int64(vm.Storage)<<20, 10),
-		LabelPublicIPv4:        vm.IPv4,
-		LabelPublicIPv6:        vm.IPv6,
-		LabelRegionID:          vm.RegionID,
-		LabelRegionCountry:     vm.RegionCountry,
-		LabelRegionCity:        vm.RegionCity,
-		LabelPlanID:            vm.PlanID,
-		LabelPlanCode:          vm.PlanCode,
-		LabelBillingType:       enumValue(vm.PlanBillingType, "BILLING_TYPE_"),
-		LabelProviderName:      vm.ProviderName,
-		LabelProviderOrgID:     vm.ProviderOrganizationID,
-		LabelFirewallRulesetID: vm.FirewallRulesetID,
-		LabelBackupsEnabled:    strconv.FormatBool(vm.HasActiveBackupSubscription),
-		LabelInstantApp:        vm.InstantAppSlug,
-	}
-	ips := make([]string, 0, len(vm.AdditionalIPv4))
-	for _, ip := range vm.AdditionalIPv4 {
-		if ip.IPAddress != "" {
-			ips = append(ips, ip.IPAddress)
-		}
-	}
-	l[LabelAdditionalIPv4] = joinList(ips, sep)
-	tags := make([]string, 0, len(vm.Tags))
-	for _, t := range vm.Tags {
-		if t = strings.TrimSpace(t); t != "" {
-			tags = append(tags, t)
-			l[LabelTagPrefix+SanitizeLabelName(t)] = "true"
-		}
-	}
-	sort.Strings(tags)
-	l[LabelTags] = joinList(tags, sep)
-	return l
+	return []TargetGroup{}
 }
 
 // joinList joins values with sep and surrounds the result with sep, the way

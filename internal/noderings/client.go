@@ -232,3 +232,79 @@ func (i *Int64) UnmarshalJSON(b []byte) error {
 	*i = Int64(v)
 	return nil
 }
+
+// GameServer is the part of a NodeRings game server that discovery uses.
+type GameServer struct {
+	ID              string `json:"id"`
+	Name            string `json:"name"`
+	GameName        string `json:"gameName"`
+	Variant         string `json:"variant"`
+	VersionValue    string `json:"versionValue"`
+	AllocationIP    string `json:"allocationIp"`
+	AllocationPort  Int64  `json:"allocationPort"`
+	Phase           string `json:"phase"`
+	PowerState      string `json:"powerState"`
+	NodeID          string `json:"nodeId"`
+	RegionID        string `json:"regionId"`
+	RegionCity      string `json:"regionCity"`
+	RegionCountry   string `json:"regionCountry"`
+	PlanID          string `json:"planId"`
+	PlanCode        string `json:"planCode"`
+	PlanBillingType string `json:"planBillingType"`
+	ProviderName    string `json:"providerName"`
+}
+
+// ListGameServers returns every game server in the organization.
+func (c *Client) ListGameServers(ctx context.Context) ([]GameServer, error) {
+	var out struct {
+		GameServers []GameServer `json:"gameServers"`
+	}
+	err := c.get(ctx, "/v1/game-servers", url.Values{"pageSize": {"-1"}}, &out)
+	return out.GameServers, err
+}
+
+// DNSZone is a hosted DNS zone.
+type DNSZone struct {
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	State        string `json:"state"`
+	DelegationOK bool   `json:"delegationOk"`
+}
+
+// DNSRecord is one record set. Name is relative to the zone, "@" for the apex.
+type DNSRecord struct {
+	Name   string   `json:"name"`
+	Type   string   `json:"type"`
+	TTL    Int64    `json:"ttl"`
+	RData  []string `json:"rdata"`
+	System bool     `json:"system"`
+}
+
+// ListDNSZones returns every DNS zone in the organization.
+func (c *Client) ListDNSZones(ctx context.Context) ([]DNSZone, error) {
+	var out struct {
+		Zones []DNSZone `json:"zones"`
+	}
+	err := c.get(ctx, "/v1/dns/zones", url.Values{"page": {"0"}, "pageSize": {"-1"}}, &out)
+	return out.Zones, err
+}
+
+// ListDNSRecords returns every record set of a zone.
+func (c *Client) ListDNSRecords(ctx context.Context, zoneID string) ([]DNSRecord, error) {
+	const pageSize = 100
+	var all []DNSRecord
+	for page := 0; ; page++ {
+		var out struct {
+			Records    []DNSRecord `json:"records"`
+			TotalCount Int64       `json:"totalCount"`
+		}
+		q := url.Values{"page": {strconv.Itoa(page)}, "pageSize": {strconv.Itoa(pageSize)}}
+		if err := c.get(ctx, "/v1/dns/zones/"+url.PathEscape(zoneID)+"/records", q, &out); err != nil {
+			return nil, err
+		}
+		all = append(all, out.Records...)
+		if len(out.Records) < pageSize || len(all) >= int(out.TotalCount) {
+			return all, nil
+		}
+	}
+}

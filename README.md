@@ -6,11 +6,20 @@
 [![Go Report Card](https://goreportcard.com/badge/github.com/noderings/prometheus-noderings-sd)](https://goreportcard.com/report/github.com/noderings/prometheus-noderings-sd)
 [![License](https://img.shields.io/github/license/noderings/prometheus-noderings-sd)](LICENSE)
 
-Prometheus service discovery for [NodeRings](https://noderings.com) virtual machines.
+Prometheus service discovery for [NodeRings](https://noderings.com) virtual machines, game servers
+and DNS records.
 
-It reads your NodeRings VMs from the API and hands them to Prometheus as scrape targets,
+It reads your NodeRings resources from the API and hands them to Prometheus as targets,
 with region, plan, provider, status and tags as labels. New VMs are monitored as soon as
 they exist; deleted ones disappear. No more hand-written IP lists in `prometheus.yml`.
+
+| Role | Targets | Typical use |
+|---|---|---|
+| `vm` (default) | Each VM's public IP and a port | Scrape [node_exporter](https://github.com/prometheus/node_exporter) or your app on every VM |
+| `gameserver` | Each game server's IP and game port | Check that every game server answers, with [blackbox_exporter](https://github.com/prometheus/blackbox_exporter) |
+| `dns` | Every A, AAAA and CNAME host name in your NodeRings DNS zones | Check every site answers over HTTPS and watch certificate expiry, with blackbox_exporter |
+
+Enable roles with `--discovery.role=vm,gameserver,dns`; each scrape job picks one with `?role=`.
 
 It supports both of Prometheus' generic discovery mechanisms:
 
@@ -48,7 +57,8 @@ docker run -d --name noderings-sd -p 10064:10064 \
 ## Quick start
 
 1. In the NodeRings dashboard, create an API token. A service account token with read
-   access to virtual machines is enough. The service never changes anything.
+   access to virtual machines (and game servers or DNS, for those roles) is enough. The
+   service never changes anything.
 2. Start the service:
 
    ```sh
@@ -75,25 +85,37 @@ docker run -d --name noderings-sd -p 10064:10064 \
    ```
 
 More in [`examples/`](examples): a full [`prometheus.yml`](examples/prometheus.yml),
-[file SD](examples/file_sd.yml), [Grafana Alloy](examples/alloy.river) and a
-[Docker Compose](examples/docker-compose.yml) setup.
+[file SD](examples/file_sd.yml), [Grafana Alloy](examples/alloy.river), a
+[Docker Compose](examples/docker-compose.yml) setup and a
+[Grafana dashboard](examples/grafana-dashboard.json) for the whole fleet (it expects the
+`instance`, `city`, `plan` and `provider` relabeling from [`prometheus.yml`](examples/prometheus.yml)).
+For game servers and DNS host names, see [`blackbox.yml`](examples/blackbox.yml).
 
 ## Endpoints
 
 | Path | Description |
 |---|---|
-| `/targets` | HTTP SD target list. `?port=<n>` overrides `--target.port`, so one instance can serve several jobs. |
+| `/targets` | HTTP SD target list. `?role=vm\|gameserver\|dns` picks the resources (default `vm`). `?port=<n>` sets the port: for VMs it overrides `--target.port`, for game servers it replaces their own port, for DNS it is appended to the host name. |
 | `/metrics` | The service's own metrics. |
 | `/-/healthy` | Always `200` while the process runs. |
-| `/-/ready` | `200` after the first successful refresh, `503` before. |
+| `/-/ready` | `200` once every enabled role has been fetched, `503` before. |
 | `/` | Landing page with links. |
 
 `/targets` follows the HTTP SD requirements: `200` with `Content-Type: application/json`,
 the full list on every request, and `[]` when there are no VMs. Before the first successful
-refresh it answers `503`, so Prometheus keeps its current targets instead of dropping them.
+refresh of that role it answers `503`, so Prometheus keeps its current targets instead of
+dropping them. A role that is not enabled answers `400`.
 When a later refresh fails, the last good list is served and the error is logged and counted.
 
 ## Labels
+
+### Shared
+
+`__meta_noderings_region_id`, `__meta_noderings_region_country`, `__meta_noderings_region_city`,
+`__meta_noderings_plan_id`, `__meta_noderings_plan_code`, `__meta_noderings_billing_type` and
+`__meta_noderings_provider_name` have the same names and meaning in the `vm` and `gameserver` roles.
+
+### `role=vm`
 
 Each VM becomes one target group. Its address is the public IPv4 (or IPv6 with
 `--target.address-family=ipv6`; a VM without that family falls back to the other) and the
@@ -126,6 +148,49 @@ during relabeling:
 | `__meta_noderings_tags` | `,env:prod,web,` | All tags |
 | `__meta_noderings_tag_<tag>` | `true` | One label per tag; characters that are not allowed become `_` |
 
+### `role=gameserver`
+
+Each game server with an address becomes one target, `<ip>:<game port>`.
+
+| Label | Example | Description |
+|---|---|---|
+| `__meta_noderings_gameserver_id` | `5b1e…` | Game server ID |
+| `__meta_noderings_gameserver_name` | `survival` | Name |
+| `__meta_noderings_gameserver_game` | `Minecraft` | Game |
+| `__meta_noderings_gameserver_variant` | `paper` | Variant |
+| `__meta_noderings_gameserver_version` | `1.21.4` | Game version |
+| `__meta_noderings_gameserver_phase` | `ready` | `pending`, `ready`, `error`, `failed` |
+| `__meta_noderings_gameserver_power_state` | `running` | Power state as last reported |
+| `__meta_noderings_gameserver_ip` | `198.51.100.7` | Game IP |
+| `__meta_noderings_gameserver_port` | `25565` | Game port |
+| `__meta_noderings_gameserver_node_id` | `91c0…` | Node the server runs on |
+| shared labels | | Region, plan, billing type, provider |
+
+### `role=dns`
+
+Each host name with a record of a type in `--dns.record-types` (default `A,AAAA,CNAME`) becomes
+one target: the fully qualified name without a port, ready to be passed to blackbox_exporter.
+System records (SOA, NS) and wildcards are left out; an A and an AAAA record of the same name
+are one target.
+
+| Label | Example | Description |
+|---|---|---|
+| `__meta_noderings_dns_zone_id` | `3cd2…` | Zone ID |
+| `__meta_noderings_dns_zone_name` | `example.com` | Zone |
+| `__meta_noderings_dns_zone_state` | `active` | Zone state, for example `pending_ns` before delegation |
+| `__meta_noderings_dns_zone_delegated` | `true` | The zone's delegation to NodeRings is in place |
+| `__meta_noderings_dns_record_name` | `www` | Name relative to the zone, `@` for the apex |
+| `__meta_noderings_dns_record_fqdn` | `www.example.com` | Full host name |
+| `__meta_noderings_dns_record_types` | `,A,AAAA,` | Record types of the name |
+| `__meta_noderings_dns_record_values` | `,203.0.113.1,` | Record values |
+| `__meta_noderings_dns_record_ttl` | `300` | Lowest TTL of the name's records |
+
+See [`examples/blackbox.yml`](examples/blackbox.yml) for probing game servers (TCP) and every
+host name (HTTPS and certificate expiry), with the matching
+[blackbox_exporter modules](examples/blackbox-exporter.yml).
+
+### Lists
+
 List labels start and end with the separator (`--target.tag-separator`, default `,`), as in
 Prometheus' built-in discoveries, so `regex: .*,web,.*` matches the tag `web` exactly.
 
@@ -139,11 +204,13 @@ All flags, with their environment variables:
 | `--noderings.token-file` (`NODERINGS_TOKEN_FILE`) | | Read the token from a file instead (Docker or Kubernetes secrets). |
 | `--noderings.organization-id` (`NODERINGS_ORGANIZATION_ID`) | token's organization | Organization to discover. |
 | `--noderings.api-url` (`NODERINGS_API_URL`) | `https://api.noderings.com` | API URL. |
-| `--discovery.refresh-interval` | `60s` | How often the VM list is fetched (minimum `10s`). |
-| `--target.port` | `80` | Port of every target. Clients can override it with `?port=`. |
+| `--discovery.role` | `vm` | Roles to discover: `vm`, `gameserver`, `dns` (comma-separated or repeated). |
+| `--discovery.refresh-interval` | `60s` | How often each role is fetched (minimum `10s`). |
+| `--dns.record-types` | `A,AAAA,CNAME` | Record types that become `dns` targets. |
+| `--target.port` | `80` | Port of every VM target. Clients can override it with `?port=`. |
 | `--target.address-family` | `ipv4` | `ipv4` or `ipv6`. |
 | `--target.tag-separator` | `,` | Separator for list labels. |
-| `--file.output` | | Also write the targets to this file for `file_sd_configs`. Written atomically, only when it changes. |
+| `--file.output` | | Also write the targets to this file for `file_sd_configs`. Written atomically, only when it changes. With several roles, put `{role}` in the name (`/etc/prometheus/noderings-{role}.json`) to get one file per role. |
 | `--web.listen-address` | `:10064` | Listen address(es). |
 | `--web.config.file` | | [TLS and basic auth](https://github.com/prometheus/exporter-toolkit/blob/master/docs/web-configuration.md) for every endpoint. |
 | `--web.targets-path` | `/targets` | Path of the HTTP SD endpoint. |
@@ -163,10 +230,10 @@ authenticates with `basic_auth` or `tls_config` in `http_sd_configs`.
 
 | Metric | Type | Description |
 |---|---|---|
-| `noderings_sd_virtual_machines` | gauge | VMs in the last successful refresh |
-| `noderings_sd_refresh_duration_seconds` | histogram | Time to fetch the VM list |
-| `noderings_sd_refresh_failures_total` | counter | Failed refreshes |
-| `noderings_sd_last_refresh_success_timestamp_seconds` | gauge | Time of the last successful refresh |
+| `noderings_sd_resources{role}` | gauge | VMs, game servers or DNS record sets in the last successful refresh |
+| `noderings_sd_refresh_duration_seconds{role}` | histogram | Time to fetch a role from the API |
+| `noderings_sd_refresh_failures_total{role}` | counter | Failed refreshes |
+| `noderings_sd_last_refresh_success_timestamp_seconds{role}` | gauge | Time of the last successful refresh |
 | `noderings_sd_build_info` | gauge | Version, revision, branch and Go version |
 
 Plus the standard `go_*` and `process_*` metrics. A useful alert:
@@ -184,7 +251,7 @@ Plus the standard `go_*` and `process_*` metrics. A useful alert:
 ```sh
 make test     # unit tests, no token needed
 make lint     # golangci-lint
-NODERINGS_TOKEN=nr_... make e2e   # live API plus a real Prometheus in Docker (read-only)
+NODERINGS_TOKEN=nr_... make e2e   # every role against the live API plus a real Prometheus in Docker (read-only)
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Security reports: [SECURITY.md](SECURITY.md).

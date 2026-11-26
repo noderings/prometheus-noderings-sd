@@ -4,6 +4,8 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -64,5 +66,44 @@ func TestNewValidates(t *testing.T) {
 	}
 	if _, err := New(Config{Endpoint: "not a url", Token: "x"}); err == nil {
 		t.Error("bad URL accepted")
+	}
+}
+
+func TestListGameServersAndDNS(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/game-servers":
+			_, _ = w.Write([]byte(`{"gameServers":[{"id":"g","allocationIp":"198.51.100.7","allocationPort":"25565"}]}`))
+		case "/v1/dns/zones":
+			_, _ = w.Write([]byte(`{"zones":[{"id":"z","name":"example.com","delegationOk":true}]}`))
+		case "/v1/dns/zones/z/records":
+			// 150 records over two pages of 100.
+			page := r.URL.Query().Get("page")
+			n := 100
+			if page == "1" {
+				n = 50
+			}
+			recs := make([]string, n)
+			for i := range recs {
+				recs[i] = `{"name":"h` + page + "-" + strconv.Itoa(i) + `","type":"A","ttl":300,"rdata":["192.0.2.1"]}`
+			}
+			_, _ = w.Write([]byte(`{"records":[` + strings.Join(recs, ",") + `],"totalCount":"150"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	c, _ := New(Config{Endpoint: srv.URL, Token: "tok"})
+	gs, err := c.ListGameServers(context.Background())
+	if err != nil || len(gs) != 1 || gs[0].AllocationPort != 25565 {
+		t.Fatalf("game servers: %+v %v", gs, err)
+	}
+	zones, err := c.ListDNSZones(context.Background())
+	if err != nil || len(zones) != 1 || !zones[0].DelegationOK {
+		t.Fatalf("zones: %+v %v", zones, err)
+	}
+	recs, err := c.ListDNSRecords(context.Background(), "z")
+	if err != nil || len(recs) != 150 {
+		t.Fatalf("records: %d %v", len(recs), err)
 	}
 }
