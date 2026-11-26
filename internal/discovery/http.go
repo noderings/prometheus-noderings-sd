@@ -2,16 +2,20 @@ package discovery
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"strings"
 )
 
-// Handler serves the HTTP SD response. The optional query parameter port
-// overrides the configured target port, so one instance can feed several
-// scrape jobs (for example node_exporter on 9100 and an application on 8080).
+// Handler serves the HTTP SD response. Query parameters:
 //
-// Until the first refresh succeeds it answers 503, so Prometheus keeps its
-// current targets instead of dropping them. Afterwards it always answers 200
-// with the latest list ([] when there are no VMs), as the HTTP SD spec requires.
+//   - role: vm (default), gameserver or dns. It must be enabled with --discovery.role.
+//   - port: for vm, overrides the configured target port; for gameserver,
+//     replaces each server's own port; for dns, is appended to each host name.
+//
+// Until the role's first refresh succeeds it answers 503, so Prometheus keeps
+// its current targets instead of dropping them. Afterwards it always answers
+// 200 with the latest list ([] when there is nothing), as the HTTP SD spec requires.
 func (d *Discoverer) Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
@@ -19,8 +23,21 @@ func (d *Discoverer) Handler() http.Handler {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+		q := r.URL.Query()
+		role := strings.ToLower(strings.TrimSpace(q.Get("role")))
+		if role == "" {
+			role = RoleVM
+		}
+		if !isRole(role) {
+			http.Error(w, fmt.Sprintf("unknown role %q: use %s", role, strings.Join(AllRoles, ", ")), http.StatusBadRequest)
+			return
+		}
+		if !d.Enabled(role) {
+			http.Error(w, fmt.Sprintf("role %q is not enabled: start the service with --discovery.role=%s", role, role), http.StatusBadRequest)
+			return
+		}
 		port := 0
-		if v := r.URL.Query().Get("port"); v != "" {
+		if v := q.Get("port"); v != "" {
 			p, err := ParsePort(v)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
@@ -28,11 +45,11 @@ func (d *Discoverer) Handler() http.Handler {
 			}
 			port = p
 		}
-		if !d.Ready() {
-			http.Error(w, "the NodeRings VM list has not been fetched yet", http.StatusServiceUnavailable)
+		if !d.Ready(role) {
+			http.Error(w, "the "+role+" list has not been fetched from the NodeRings API yet", http.StatusServiceUnavailable)
 			return
 		}
-		body, err := json.Marshal(d.TargetGroups(port))
+		body, err := json.Marshal(d.TargetGroups(role, port))
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return

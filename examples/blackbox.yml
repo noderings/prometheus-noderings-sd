@@ -1,0 +1,51 @@
+# Probing NodeRings game servers and DNS host names with blackbox_exporter
+# (https://github.com/prometheus/blackbox_exporter). Start the discovery with
+#   prometheus-noderings-sd --discovery.role=vm,gameserver,dns
+# and blackbox_exporter with examples/blackbox-exporter.yml on localhost:9115.
+scrape_configs:
+  # Is each game server's port reachable? A TCP connect to the game port.
+  - job_name: noderings-gameserver
+    metrics_path: /probe
+    params:
+      module: [tcp_connect]
+    http_sd_configs:
+      - url: http://localhost:10064/targets?role=gameserver
+    relabel_configs:
+      # Only servers that finished installing.
+      - source_labels: [__meta_noderings_gameserver_phase]
+        regex: ready
+        action: keep
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__meta_noderings_gameserver_name]
+        target_label: instance
+      - source_labels: [__meta_noderings_gameserver_game]
+        target_label: game
+      - source_labels: [__meta_noderings_region_city]
+        target_label: city
+      - target_label: __address__
+        replacement: localhost:9115
+
+  # Does every web host name in your zones answer over HTTPS, and when does
+  # its certificate expire (probe_ssl_earliest_cert_expiry)?
+  - job_name: noderings-dns-https
+    metrics_path: /probe
+    params:
+      module: [https_2xx]
+    http_sd_configs:
+      - url: http://localhost:10064/targets?role=dns
+    relabel_configs:
+      # Only zones whose delegation to NodeRings is in place.
+      - source_labels: [__meta_noderings_dns_zone_delegated]
+        regex: "true"
+        action: keep
+      - source_labels: [__address__]
+        regex: (.+)
+        target_label: __param_target
+        replacement: https://$1
+      - source_labels: [__meta_noderings_dns_record_fqdn]
+        target_label: instance
+      - source_labels: [__meta_noderings_dns_zone_name]
+        target_label: zone
+      - target_label: __address__
+        replacement: localhost:9115

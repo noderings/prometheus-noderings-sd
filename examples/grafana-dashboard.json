@@ -121,7 +121,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "max(noderings_sd_virtual_machines)",
+          "expr": "max(noderings_sd_resources{role=\"vm\"})",
           "legendFormat": ""
         }
       ],
@@ -293,7 +293,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "time() - max(noderings_sd_last_refresh_success_timestamp_seconds)",
+          "expr": "time() - max(noderings_sd_last_refresh_success_timestamp_seconds{role=\"vm\"})",
           "legendFormat": ""
         }
       ],

@@ -36,7 +36,7 @@ func sampleVMs() []noderings.VirtualMachine {
 }
 
 func TestBuildLabels(t *testing.T) {
-	groups := Build(sampleVMs(), Options{Port: 9100})
+	groups := BuildVMs(sampleVMs(), Options{Port: 9100})
 	if len(groups) != 2 {
 		t.Fatalf("got %d groups, want 2 (the VM without an address is left out)", len(groups))
 	}
@@ -74,7 +74,7 @@ func TestBuildLabels(t *testing.T) {
 }
 
 func TestBuildIPv6AndSeparator(t *testing.T) {
-	groups := Build(sampleVMs()[:1], Options{AddressFamily: AddressIPv6, TagSeparator: ";"})
+	groups := BuildVMs(sampleVMs()[:1], Options{AddressFamily: AddressIPv6, TagSeparator: ";"})
 	if got := groups[0].Targets[0]; got != "[2001:db8::10]:80" {
 		t.Errorf("target = %q", got)
 	}
@@ -92,12 +92,36 @@ func TestSanitizeLabelName(t *testing.T) {
 }
 
 type fakeLister struct {
-	vms []noderings.VirtualMachine
-	err error
+	vms     []noderings.VirtualMachine
+	games   []noderings.GameServer
+	zones   []noderings.DNSZone
+	records map[string][]noderings.DNSRecord
+	err     error
 }
 
 func (f *fakeLister) ListVirtualMachines(context.Context) ([]noderings.VirtualMachine, error) {
 	return f.vms, f.err
+}
+
+func (f *fakeLister) ListGameServers(context.Context) ([]noderings.GameServer, error) {
+	return f.games, f.err
+}
+
+func (f *fakeLister) ListDNSZones(context.Context) ([]noderings.DNSZone, error) {
+	return f.zones, f.err
+}
+
+func (f *fakeLister) ListDNSRecords(_ context.Context, zoneID string) ([]noderings.DNSRecord, error) {
+	return f.records[zoneID], f.err
+}
+
+func mustNew(t *testing.T, l Lister, roles []string, opts Options, reg prometheus.Registerer) *Discoverer {
+	t.Helper()
+	d, err := New(l, roles, opts, nil, reg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return d
 }
 
 func get(t *testing.T, h http.Handler, target string) *httptest.ResponseRecorder {
@@ -110,7 +134,7 @@ func get(t *testing.T, h http.Handler, target string) *httptest.ResponseRecorder
 func TestHandler(t *testing.T) {
 	lister := &fakeLister{err: errors.New("down")}
 	reg := prometheus.NewRegistry()
-	d := New(lister, Options{Port: 9100}, nil, reg)
+	d := mustNew(t, lister, nil, Options{Port: 9100}, reg)
 	h := d.Handler()
 
 	// Before any successful refresh: 503, so Prometheus keeps its targets.
@@ -159,15 +183,15 @@ func TestHandler(t *testing.T) {
 	// A failed refresh keeps the previous list.
 	lister.err = errors.New("down again")
 	_ = d.Refresh(context.Background())
-	if d.VMCount() != 3 || get(t, h, "/targets").Code != http.StatusOK {
+	if d.Count(RoleVM) != 3 || get(t, h, "/targets").Code != http.StatusOK {
 		t.Error("previous list not kept after a failed refresh")
 	}
 
-	if got := testutil.ToFloat64(d.metrics.failures); got != 2 {
+	if got := testutil.ToFloat64(d.metrics.failures.WithLabelValues(RoleVM)); got != 2 {
 		t.Errorf("failures = %v, want 2", got)
 	}
-	if got := testutil.ToFloat64(d.metrics.vms); got != 3 {
-		t.Errorf("vms gauge = %v, want 3", got)
+	if got := testutil.ToFloat64(d.metrics.resources.WithLabelValues(RoleVM)); got != 3 {
+		t.Errorf("resources gauge = %v, want 3", got)
 	}
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/targets", nil))
@@ -178,7 +202,7 @@ func TestHandler(t *testing.T) {
 
 func TestMetricsLint(t *testing.T) {
 	reg := prometheus.NewRegistry()
-	New(&fakeLister{}, Options{}, nil, reg)
+	mustNew(t, &fakeLister{}, AllRoles, Options{}, reg)
 	problems, err := testutil.GatherAndLint(reg)
 	if err != nil {
 		t.Fatal(err)
@@ -191,9 +215,9 @@ func TestMetricsLint(t *testing.T) {
 func TestOnUpdateAndFileWriter(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "noderings.json")
 	fw := &FileWriter{Path: path}
-	d := New(&fakeLister{vms: sampleVMs()}, Options{}, nil, nil)
-	d.OnUpdate(func(vms []noderings.VirtualMachine) {
-		if err := fw.Write(Build(vms, Options{})); err != nil {
+	d := mustNew(t, &fakeLister{vms: sampleVMs()}, nil, Options{}, nil)
+	d.OnUpdate(func(role string) {
+		if err := fw.Write(d.TargetGroups(role, 0)); err != nil {
 			t.Error(err)
 		}
 	})
@@ -214,7 +238,7 @@ func TestOnUpdateAndFileWriter(t *testing.T) {
 	}
 	// Same content: no rewrite.
 	before := st.ModTime()
-	if err := fw.Write(d.TargetGroups(0)); err != nil {
+	if err := fw.Write(d.TargetGroups(RoleVM, 0)); err != nil {
 		t.Fatal(err)
 	}
 	st, _ = os.Stat(path)
