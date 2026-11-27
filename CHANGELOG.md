@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-11-27
+
 ### Added
 
 - HTTP service discovery endpoint (`/targets`) for `http_sd_configs`, Grafana Alloy and
@@ -18,3 +20,6 @@ All notable changes to this project are documented here. The format follows
 - Own metrics (`noderings_sd_*`), `/-/healthy`, `/-/ready`, landing page, and TLS and basic
   auth through the Prometheus exporter-toolkit (`--web.config.file`).
 - Binaries for Linux, macOS, Windows and FreeBSD, and a multi-arch container image.
+
+[Unreleased]: https://github.com/noderings/prometheus-noderings-sd/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/noderings/prometheus-noderings-sd/releases/tag/v0.1.0
