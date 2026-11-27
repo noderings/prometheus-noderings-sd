@@ -2,9 +2,11 @@
 
 [![ci](https://github.com/noderings/prometheus-noderings-sd/actions/workflows/ci.yml/badge.svg)](https://github.com/noderings/prometheus-noderings-sd/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/noderings/prometheus-noderings-sd?sort=semver)](https://github.com/noderings/prometheus-noderings-sd/releases)
-[![Container image](https://img.shields.io/badge/image-ghcr.io%2Fnoderings%2Fprometheus--noderings--sd-blue)](https://github.com/noderings/prometheus-noderings-sd/pkgs/container/prometheus-noderings-sd)
-[![Go Report Card](https://goreportcard.com/badge/github.com/noderings/prometheus-noderings-sd)](https://goreportcard.com/report/github.com/noderings/prometheus-noderings-sd)
-[![License](https://img.shields.io/github/license/noderings/prometheus-noderings-sd)](LICENSE)
+[![Go Reference](https://pkg.go.dev/badge/github.com/noderings/prometheus-noderings-sd.svg)](https://pkg.go.dev/github.com/noderings/prometheus-noderings-sd)
+[![Go version](https://img.shields.io/github/go-mod/go-version/noderings/prometheus-noderings-sd)](go.mod)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/noderings/prometheus-noderings-sd/badge)](https://scorecard.dev/viewer/?uri=github.com/noderings/prometheus-noderings-sd)
+[![Container image](https://img.shields.io/badge/ghcr.io-prometheus--noderings--sd-blue?logo=docker&logoColor=white)](https://github.com/noderings/prometheus-noderings-sd/pkgs/container/prometheus-noderings-sd)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
 Prometheus service discovery for [NodeRings](https://noderings.com) virtual machines, game servers
 and DNS records.
