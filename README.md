@@ -264,7 +264,8 @@ Other NodeRings integrations: [Terraform/OpenTofu](https://github.com/noderings/
 [Pulumi](https://github.com/noderings/pulumi-noderings),
 [Ansible](https://github.com/noderings/ansible-collection-noderings),
 [external-dns](https://github.com/noderings/external-dns-noderings-webhook),
-[cert-manager](https://github.com/noderings/cert-manager-webhook-noderings).
+[cert-manager](https://github.com/noderings/cert-manager-webhook-noderings),
+[Go SDK](https://github.com/noderings/noderings-go).
 
 ## License
 
