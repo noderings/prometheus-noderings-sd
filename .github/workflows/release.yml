@@ -5,15 +5,16 @@ on:
     tags: ["v*"]
 
 permissions:
-  contents: write
-  packages: write
-  id-token: write
-  attestations: write
+  contents: read
 
 jobs:
   binaries:
     name: Binaries and GitHub release
     runs-on: ubuntu-latest
+    permissions:
+      contents: write     # create the GitHub release
+      id-token: write     # sign the build provenance attestation
+      attestations: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -33,6 +34,9 @@ jobs:
   image:
     name: Container image
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write     # push to ghcr.io
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4
